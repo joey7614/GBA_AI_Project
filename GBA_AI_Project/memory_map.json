@@ -1,0 +1,45 @@
+{
+  "game": "Pokemon Emerald (US) - BPEE",
+  "base_addresses": {
+    "ewram_start": "0x02000000",
+    "iwram_start": "0x03000000"
+  },
+  "fixed_pointers": {
+    "gSaveBlock1Ptr": "0x03005D8C",
+    "gSaveBlock2Ptr": "0x03005D90",
+    "gPokemonStoragePtr": "0x03005D94"
+  },
+  "dynamic_offsets": {
+    "from_gSaveBlock2": {
+      "player_name": "0x00",
+      "player_gender": "0x08",
+      "player_id": "0x0A",
+      "play_time_hours": "0x0E",
+      "play_time_minutes": "0x10"
+    },
+    "from_gSaveBlock1": {
+      "pos_x": "0x00",
+      "pos_y": "0x02",
+      "map_group": "0x04",
+      "map_num": "0x05"
+    }
+  },
+  "task_system": {
+    "gTasks_base": "0x03005E00",
+    "gTasks_base_CONFIRMED": true,
+    "task_count": 16,
+    "task_size_bytes": 40,
+    "task_func_offset": 0,
+    "task_active_offset": 4,
+    "notes": "CONFIRMED via step2i scan. 0x03004AE4 was WRONG (contained ARM opcodes). 0x03005E00 shows 16/16 valid ROM pointers with correct active flags. Slots 0-3 active=1 during normal overworld.",
+    "dialog_func_ptr": "0x08098155",
+    "dialog_func_ptr_CONFIRMED": true,
+    "dialog_detection": "Scan gTasks slots. If any slot has active=1 AND func=0x08098155, dialog is OPEN."
+  },
+  "engine_offsets": {
+    "script_context_1": "0x0300052C",
+    "text_buffer_main": "0x0202161C",
+    "REMOVED_wrong_guesses": "text_printer_busy(0x020204BC) and current_npc_id(0x02036E4C) were unverified guesses"
+  },
+  "notes": "Dialog state has NO single static address. It is task-based (gTasks). Use gTasks scan to detect dialogs. Once dialog_func_ptr is captured via step2h, embed it in bridge.lua as the permanent detection key."
+}

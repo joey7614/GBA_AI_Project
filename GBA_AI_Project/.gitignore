@@ -1,0 +1,19 @@
+# API keys / secrets
+.env
+
+# ROM files (copyrighted)
+roms/
+*.gba
+*.sav
+
+# Runtime / generated
+ipc/
+game_agent.db
+__pycache__/
+*.pyc
+
+# pokeemerald is its own large git repo — don't nest it
+pokeemerald/
+
+# Claude local session data
+.claude/
