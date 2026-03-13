@@ -1,111 +1,64 @@
--- OpenClaw Bridge v2.0
--- Runs inside mGBA (Tools -> Scripting -> Load Script)
--- Communicates with Python via files in the ipc/ folder
+-- OpenClaw Bridge
+-- Runs inside mGBA: Tools -> Scripting -> Load Script
 --
--- FILE PROTOCOL:
---   ipc/trigger.json  -- Lua writes this when dialog opens
---   ipc/response.txt  -- Python writes AI text here
---   ipc/status.txt    -- Lua writes current state (for debugging)
+-- IPC protocol (matches gOpenClawIPC struct at 0x0203F468):
+--   +0   request_ready  (u8) — ROM sets 1 when NPC dialog fires
+--   +1   response_ready (u8) — Lua sets 1 when AI text is ready
+--   +2   pad[2]
+--   +4   npc_orig_text[128]  — Gen3 bytes of original NPC line
+--   +132 ai_text[128]        — Lua writes Gen3 bytes from Python here
 --
--- ALL ADDRESSES CONFIRMED via step2d / step2j testing
+-- File protocol:
+--   ipc/request.json  — Lua writes when request_ready==1
+--   ipc/response.json — Python writes {"ai_bytes":[...]} Gen3 byte list
 
 -- ============================================================
 -- CONFIG
 -- ============================================================
-local IPC_DIR       = "C:/Users/JL/Documents/GBA_AI_Project/ipc/"
-local TRIGGER_FILE  = IPC_DIR .. "trigger.json"
-local RESPONSE_FILE = IPC_DIR .. "response.txt"
-local STATUS_FILE   = IPC_DIR .. "status.txt"
+local IPC_BASE      = 0x0203F468
+local IPC_DIR       = "C:/Users/linji/Documents/GBA_AI_Project/GBA_AI_Project/ipc/"
+local REQUEST_FILE  = IPC_DIR .. "request.json"
+local RESPONSE_FILE = IPC_DIR .. "response.json"
 
--- ---- Dialog detection via gTasks (CONFIRMED) ----
-local GTASKS_BASE = 0x03005E00   -- confirmed via step2i scan
-local TASK_SIZE   = 40
-local TASK_COUNT  = 16
-local DIALOG_FUNC = 0x08098155   -- confirmed via step2j (appeared on every dialog open)
-
--- ---- Player data via pointer chain (CONFIRMED) ----
-local SAVEBLOCK2_PTR = 0x03005D90  -- fixed IWRAM ptr -> dynamic EWRAM addr
-local SAVEBLOCK1_PTR = 0x03005D8C  -- fixed IWRAM ptr -> dynamic EWRAM addr
-
--- ---- Text buffer for response injection ----
-local TEXT_BUFFER = 0x0202161C    -- gTextBuffer (from pokeemerald research)
+local EOS      = 0xFF
+local TEXT_MAX = 127
 
 -- ============================================================
--- CHARACTER ENCODING (Pokemon Gen 3)
+-- GAME STATE READERS  (SaveBlock pointers — confirmed Fire Red)
 -- ============================================================
-local CHARSET = {}   -- byte -> ASCII (for reading)
-local REVMAP  = {}   -- ASCII code -> byte (for writing)
-
-for i = 0, 25 do
-    CHARSET[0xBB + i] = string.char(65 + i)   -- A-Z
-    CHARSET[0xD5 + i] = string.char(97 + i)   -- a-z
-    REVMAP[65 + i] = 0xBB + i
-    REVMAP[97 + i] = 0xD5 + i
-end
-CHARSET[0xAB] = " "
-CHARSET[0xAD] = "!"
-CHARSET[0xAE] = "?"
-CHARSET[0xAF] = "."
-REVMAP[32] = 0xAB
-REVMAP[33] = 0xAD
-REVMAP[63] = 0xAE
-REVMAP[46] = 0xAF
-
-local function decode_string(addr, max_len)
-    local result = ""
-    for i = 0, max_len - 1 do
-        local b = emu:read8(addr + i)
-        if b == 0xFF or b == 0x00 then break end
-        result = result .. (CHARSET[b] or "")
-    end
-    return result
-end
-
-local function encode_string(text, addr, max_len)
-    local written = 0
-    for i = 1, #text do
-        if written >= max_len - 1 then break end
-        local c = string.byte(text, i)
-        emu:write8(addr + written, REVMAP[c] or 0xAB)
-        written = written + 1
-    end
-    emu:write8(addr + written, 0xFF)
-    return written
-end
-
--- ============================================================
--- GAME STATE READERS
--- ============================================================
-local function is_dialog_open()
-    for i = 0, TASK_COUNT - 1 do
-        local slot = GTASKS_BASE + i * TASK_SIZE
-        if emu:read8(slot + 4) == 1 then         -- active flag
-            if emu:read32(slot) == DIALOG_FUNC then  -- func pointer
-                return true
-            end
-        end
-    end
-    return false
-end
-
-local function get_player_name()
-    local sb2 = emu:read32(SAVEBLOCK2_PTR)
-    if sb2 == 0 then return "???" end
-    return decode_string(sb2, 8)
-end
+local SAVEBLOCK1_PTR = 0x03005D8C
+local SAVEBLOCK2_PTR = 0x03005D90
 
 local function get_map_info()
     local sb1 = emu:read32(SAVEBLOCK1_PTR)
-    if sb1 == 0 then return 0, 0, 0, 0 end
-    local x         = emu:read16(sb1 + 0x00)
-    local y         = emu:read16(sb1 + 0x02)
-    local map_group = emu:read8(sb1  + 0x04)
-    local map_num   = emu:read8(sb1  + 0x05)
-    return x, y, map_group, map_num
+    if sb1 == 0 then return 0, 0 end
+    local map_group = emu:read8(sb1 + 0x04)
+    local map_num   = emu:read8(sb1 + 0x05)
+    return map_group, map_num
 end
 
 -- ============================================================
--- IPC HELPERS
+-- MEMORY HELPERS
+-- ============================================================
+local function read_gen3_bytes(base_addr)
+    local bytes = {}
+    for i = 0, TEXT_MAX - 1 do
+        local b = emu:read8(base_addr + i)
+        if b == EOS then break end
+        bytes[#bytes + 1] = b
+    end
+    return bytes
+end
+
+local function write_gen3_bytes(base_addr, bytes)
+    for i, b in ipairs(bytes) do
+        emu:write8(base_addr + i - 1, b)
+    end
+    emu:write8(base_addr + #bytes, EOS)
+end
+
+-- ============================================================
+-- FILE HELPERS
 -- ============================================================
 local function file_exists(path)
     local f = io.open(path, "r")
@@ -115,114 +68,105 @@ end
 
 local function write_file(path, content)
     local f = io.open(path, "w")
-    if f then f:write(content) f:close() return true end
-    return false
+    if not f then
+        console:log("[OpenClaw] ERROR: cannot write " .. path)
+        return false
+    end
+    f:write(content)
+    f:close()
+    return true
 end
 
 local function read_file(path)
     local f = io.open(path, "r")
-    if f then local c = f:read("*a") f:close() return c end
-    return nil
-end
-
-local function json_escape(s)
-    s = s:gsub('\\', '\\\\')
-    s = s:gsub('"', '\\"')
-    return s
+    if not f then return nil end
+    local c = f:read("*a")
+    f:close()
+    return c
 end
 
 -- ============================================================
--- STATE
+-- JSON HELPERS
 -- ============================================================
-local last_dialog   = false
-local waiting       = false
-local wait_frames   = 0
-local frame_count   = 0
-local TIMEOUT_FRAMES = 600   -- 10 seconds
+local function bytes_to_json_array(bytes)
+    local parts = {}
+    for _, b in ipairs(bytes) do
+        parts[#parts + 1] = tostring(b)
+    end
+    return "[" .. table.concat(parts, ",") .. "]"
+end
+
+-- Parse {"ai_bytes": [1,2,3,...]} from response.json
+local function parse_ai_bytes(content)
+    local arr_str = content:match('"ai_bytes"%s*:%s*(%[.-%])')
+    if not arr_str then return nil end
+    local bytes = {}
+    for num in arr_str:gmatch("%d+") do
+        bytes[#bytes + 1] = tonumber(num)
+    end
+    return bytes
+end
 
 -- ============================================================
 -- MAIN FRAME LOOP
 -- ============================================================
+local waiting      = false
+local wait_frames  = 0
+local TIMEOUT      = 600   -- 10 seconds at 60fps
+
 callbacks:add("frame", function()
-    frame_count = frame_count + 1
 
-    local dialog = is_dialog_open()
+    -- ---- Check request from ROM ----
+    if not waiting and emu:read8(IPC_BASE) == 1 then
+        local orig_bytes = read_gen3_bytes(IPC_BASE + 4)
+        local mg, mn     = get_map_info()
 
-    -- ---- New dialog detected ----
-    if not last_dialog and dialog and not waiting then
-        local player = get_player_name()
-        local x, y, mg, mn = get_map_info()
-
-        os.remove(TRIGGER_FILE)
-        os.remove(RESPONSE_FILE)
-
-        local trigger = string.format(
-            '{"player_name":"%s","map_group":%d,"map_num":%d,"pos_x":%d,"pos_y":%d,"frame":%d}',
-            json_escape(player), mg, mn, x, y, frame_count
+        local json = string.format(
+            '{"npc_orig_bytes":%s,"map_group":%d,"map_num":%d}',
+            bytes_to_json_array(orig_bytes), mg, mn
         )
 
-        if write_file(TRIGGER_FILE, trigger) then
-            waiting    = true
+        if write_file(REQUEST_FILE, json) then
+            emu:write8(IPC_BASE, 0)   -- clear request_ready
+            waiting     = true
             wait_frames = 0
             console:log(string.format(
-                "[OpenClaw] Dialog! Player='%s' map=%d/%d pos=(%d,%d)",
-                player, mg, mn, x, y))
-        else
-            console:log("[OpenClaw] ERROR: cannot write trigger file!")
+                "[OpenClaw] Request sent — %d bytes, map %d/%d",
+                #orig_bytes, mg, mn))
         end
     end
 
-    -- ---- Dialog closed before response arrived ----
-    if last_dialog and not dialog and waiting then
-        console:log("[OpenClaw] Dialog closed (no response yet). Cleaning up.")
-        os.remove(TRIGGER_FILE)
-        os.remove(RESPONSE_FILE)
-        waiting = false
-    end
-
-    -- ---- Poll for AI response ----
-    if waiting and dialog then
+    -- ---- Poll for Python response ----
+    if waiting then
         wait_frames = wait_frames + 1
 
         if file_exists(RESPONSE_FILE) then
-            local response = read_file(RESPONSE_FILE)
+            local content = read_file(RESPONSE_FILE)
             os.remove(RESPONSE_FILE)
-            os.remove(TRIGGER_FILE)
 
-            if response and #response > 0 then
-                response = response:match("^%s*(.-)%s*$")
-                local written = encode_string(response, TEXT_BUFFER, 80)
-                waiting = false
+            local ai_bytes = content and parse_ai_bytes(content)
+            if ai_bytes and #ai_bytes > 0 then
+                write_gen3_bytes(IPC_BASE + 132, ai_bytes)
+                emu:write8(IPC_BASE + 1, 1)   -- set response_ready
                 console:log(string.format(
-                    "[OpenClaw] Injected %d chars: '%s'", written, response:sub(1, 50)))
+                    "[OpenClaw] Response injected — %d bytes", #ai_bytes))
+            else
+                console:log("[OpenClaw] ERROR: bad response.json")
             end
+            waiting = false
         end
 
-        if wait_frames >= TIMEOUT_FRAMES then
-            console:log("[OpenClaw] TIMEOUT. Resetting.")
-            os.remove(TRIGGER_FILE)
-            waiting    = false
+        if wait_frames >= TIMEOUT then
+            console:log("[OpenClaw] TIMEOUT waiting for Python")
+            waiting     = false
             wait_frames = 0
         end
     end
 
-    -- ---- Status file (every 5 seconds) ----
-    if frame_count % 300 == 0 then
-        write_file(STATUS_FILE, string.format(
-            '{"frame":%d,"dialog":%s,"waiting":%s}',
-            frame_count,
-            dialog and "true" or "false",
-            waiting and "true" or "false"
-        ))
-    end
-
-    last_dialog = dialog
 end)
 
 console:log("============================================")
-console:log("[OpenClaw] Bridge v2.0 loaded!")
-console:log("  Dialog detection: gTasks @ 0x03005E00, func=0x08098155")
-console:log("  Player name: *gSaveBlock2Ptr + 0x00")
-console:log("  Map info:    *gSaveBlock1Ptr + 0x04/0x05")
-console:log("  IPC dir: " .. IPC_DIR)
+console:log("[OpenClaw] Bridge loaded")
+console:log("  IPC_BASE  = 0x0203F468")
+console:log("  IPC dir   = " .. IPC_DIR)
 console:log("============================================")
