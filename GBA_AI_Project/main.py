@@ -147,17 +147,35 @@ def build_prompt(orig_text: str, memories: list[dict], affinity: int) -> str:
         f"with real emotion, personality, and warmth. Sound like a person, not a robot.\n\n"
         f"The game script has you say: \"{display_text[:100]}\"\n"
         f"This player is your {bond} (bond level {affinity}).{memory_block}\n\n"
-        f"Respond naturally AS this character. Be expressive. 1-2 sentences max. "
-        f"Under 100 characters. Plain ASCII only (letters, numbers, spaces, . , ! ? - '). "
+        f"Respond naturally AS this character. Be expressive but BRIEF — "
+        f"max 1 short sentence, under 35 characters. "
+        f"Plain ASCII only (letters, numbers, spaces, . , ! ? - '). "
         f"No quotes around your reply."
     )
+
+def word_wrap(text: str, line_width: int = 18) -> str:
+    """Wrap text to fit GBA dialog box (18 chars/line, 2 lines per page)."""
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        test = (current + " " + word).strip()
+        if len(test) <= line_width:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word[:line_width]
+    if current:
+        lines.append(current)
+    return "\n".join(lines[:2])  # max 2 lines per dialog box
+
 
 def generate_response(model: genai.GenerativeModel, prompt: str) -> str:
     try:
         result = model.generate_content(prompt)
         text = result.text.strip()
-        if len(text) > 100:
-            text = text[:97] + "..."
+        text = word_wrap(text)
         return text
     except Exception as e:
         print(f"[AI] Gemini error: {e}", file=sys.stderr)

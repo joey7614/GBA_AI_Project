@@ -148,6 +148,17 @@ callbacks:add("frame", function()
             if ai_bytes and #ai_bytes > 0 then
                 write_gen3_bytes(IPC_BASE + 132, ai_bytes)
                 emu:write8(IPC_BASE + 1, 1)   -- set response_ready
+                -- Debug: log all bytes to verify 0xFE (254) newline is present
+                local byteLog = "[OpenClaw] Bytes: "
+                local has_newline = false
+                for i, b in ipairs(ai_bytes) do
+                    byteLog = byteLog .. string.format("%02X ", b)
+                    if b == 0xFE then has_newline = true end
+                end
+                console:log(byteLog)
+                if has_newline then
+                    console:log("[OpenClaw] Has 0xFE newline — 2-line text expected")
+                end
                 console:log(string.format(
                     "[OpenClaw] Response injected — %d bytes", #ai_bytes))
             else
