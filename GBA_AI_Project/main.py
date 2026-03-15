@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -124,6 +126,71 @@ SKIP_AI_MAPS: set[tuple[int, int]] = {
 
 
 # ============================================================
+# NPC PERSONALITY & THINKING FILLERS
+# Shown when player re-talks to an NPC while AI is still generating.
+# ============================================================
+PERSONALITY_FILLERS: dict[str, list[str]] = {
+    "MOTHERLY": [
+        "Hmm...",
+        "Oh my...",
+        "Now, let me think...",
+        "Oh, sweetie...",
+        "My, my...",
+        "Well...",
+    ],
+    "GRUFF": [
+        "Hmph.",
+        "...",
+        "Bah.",
+        "Hold on.",
+        "Hm.",
+    ],
+    "CHEERFUL": [
+        "Ooh!",
+        "Umm...",
+        "Oh!",
+        "Heehee...",
+        "Hmm!",
+    ],
+    "SCHOLARLY": [
+        "Fascinating...",
+        "Hmm, yes...",
+        "Interesting...",
+        "Let me see...",
+        "Ah...",
+    ],
+    "NERVOUS": [
+        "U-um...",
+        "Uh...",
+        "W-well...",
+        "Eek, uh...",
+    ],
+    "MYSTERIOUS": [
+        "...",
+        "Curious...",
+        "I see...",
+        "Mmm...",
+    ],
+    "DEFAULT": [
+        "Hmm...",
+        "...",
+        "Let me think...",
+    ],
+}
+
+# npc_key ("{map_group}_{map_num}") → personality type
+# Add entries here as you identify NPCs via the [REQUEST] log.
+NPC_PERSONALITY: dict[str, str] = {
+    "0_0": "MOTHERLY",   # Pallet Town Player's House 1F — Mom
+}
+
+
+def get_filler(npc_key: str) -> str:
+    personality = NPC_PERSONALITY.get(npc_key, "DEFAULT")
+    return random.choice(PERSONALITY_FILLERS[personality])
+
+
+# ============================================================
 # AI RESPONSE
 # ============================================================
 def build_prompt(orig_text: str, memories: list[dict], affinity: int) -> str:
@@ -171,7 +238,7 @@ def word_wrap(text: str, line_width: int = 18) -> str:
     return "\n".join(lines[:2])  # max 2 lines per dialog box
 
 
-def generate_response(model: genai.GenerativeModel, prompt: str) -> str:
+def generate_response(model: genai.GenerativeModel, prompt: str) -> str | None:
     try:
         result = model.generate_content(prompt)
         text = result.text.strip()
@@ -179,7 +246,85 @@ def generate_response(model: genai.GenerativeModel, prompt: str) -> str:
         return text
     except Exception as e:
         print(f"[AI] Gemini error: {e}", file=sys.stderr)
-        return "..."
+        return None
+
+
+# ============================================================
+# PRE-FETCH CACHE  (per-NPC, thread-safe)
+# ============================================================
+# _npc_cache[npc_key]  = pre-generated ai_bytes ready for next talk
+# _generating          = npc_keys whose background thread is running
+# _conv_timers[npc_key]= debounce timer — fires after conversation goes quiet
+# Generation is delayed CONV_END_SECS after the last message of a conversation,
+# so multi-message conversations don't trigger premature generation.
+_npc_cache:   dict[str, list[int]]          = {}
+_generating:  set[str]                      = set()
+_conv_timers: dict[str, threading.Timer]    = {}
+_cache_lock                                 = threading.Lock()
+
+CONV_END_SECS = 2.5   # seconds of silence before we consider a conversation over
+
+
+def _background_generate(
+    model:     genai.GenerativeModel,
+    npc_key:   str,
+    orig_text: str,
+) -> None:
+    try:
+        conn     = get_db()          # each thread gets its own connection
+        memories = get_npc_memory(conn, npc_key)
+        affinity = get_npc_affinity(conn, npc_key)
+        prompt   = build_prompt(orig_text, memories, affinity)
+        print(f"  [BG:{npc_key}] Generating...")
+        t0       = time.time()
+        response = generate_response(model, prompt)
+        elapsed  = time.time() - t0
+        if response is None:
+            print(f"  [BG:{npc_key}] Failed ({elapsed:.1f}s) — not caching")
+            conn.close()
+            return
+        print(f"  [BG:{npc_key}] Done ({elapsed:.1f}s): '{response}'")
+        save_interaction(conn, npc_key, response)
+        conn.close()
+        ai_bytes = encode_text(response, max_len=126)
+        with _cache_lock:
+            _npc_cache[npc_key] = ai_bytes
+    finally:
+        with _cache_lock:
+            _generating.discard(npc_key)
+
+
+def _kick_background(
+    model:     genai.GenerativeModel,
+    npc_key:   str,
+    orig_text: str,
+) -> None:
+    with _cache_lock:
+        if npc_key in _generating:
+            return
+        _generating.add(npc_key)
+    threading.Thread(
+        target=_background_generate,
+        args=(model, npc_key, orig_text),
+        daemon=True,
+    ).start()
+
+
+def _schedule_prefetch(
+    model:     genai.GenerativeModel,
+    npc_key:   str,
+    orig_text: str,
+) -> None:
+    """Debounced background kick — resets on each new message in the same conversation."""
+    with _cache_lock:
+        old = _conv_timers.pop(npc_key, None)
+    if old:
+        old.cancel()
+    t = threading.Timer(CONV_END_SECS, _kick_background, args=(model, npc_key, orig_text))
+    with _cache_lock:
+        _conv_timers[npc_key] = t
+    t.start()
+    print(f"  [PREFETCH:{npc_key}] Scheduled in {CONV_END_SECS}s")
 
 
 # ============================================================
@@ -211,11 +356,11 @@ def main() -> None:
                 time.sleep(0.1)
                 continue
 
-            orig_bytes  = data.get("npc_orig_bytes", [])
-            map_group   = int(data.get("map_group", 0))
-            map_num     = int(data.get("map_num", 0))
-            orig_text   = decode_gen3(orig_bytes)
-            npc_key     = f"{map_group}_{map_num}"
+            orig_bytes = data.get("npc_orig_bytes", [])
+            map_group  = int(data.get("map_group", 0))
+            map_num    = int(data.get("map_num", 0))
+            orig_text  = decode_gen3(orig_bytes)
+            npc_key    = f"{map_group}_{map_num}"
 
             print(f"\n[REQUEST] map={map_group}/{map_num}  orig='{orig_text}'")
 
@@ -228,25 +373,39 @@ def main() -> None:
                 )
                 continue
 
-            memories = get_npc_memory(conn, npc_key)
-            affinity = get_npc_affinity(conn, npc_key)
-            print(f"  Affinity: {affinity}  Memories: {len(memories)}")
+            with _cache_lock:
+                cached = _npc_cache.pop(npc_key, None)
 
-            prompt   = build_prompt(orig_text, memories, affinity)
-            print("  Calling Gemini...")
-            t0       = time.time()
-            response = generate_response(model, prompt)
-            elapsed  = time.time() - t0
-            print(f"  Response ({elapsed:.1f}s): '{response}'")
+            if cached is not None:
+                # Pre-generated response ready — serve it immediately
+                print(f"  [CACHE HIT] Serving pre-generated response for {npc_key}")
+                RESPONSE_FILE.write_text(
+                    json.dumps({"ai_bytes": cached}), encoding="utf-8"
+                )
+                # Kick off generation of the NEXT response in background
+                _schedule_prefetch(model, npc_key, orig_text)
+            else:
+                with _cache_lock:
+                    still_generating = npc_key in _generating
 
-            save_interaction(conn, npc_key, response)
-
-            ai_bytes = encode_text(response, max_len=126)
-            RESPONSE_FILE.write_text(
-                json.dumps({"ai_bytes": ai_bytes}),
-                encoding="utf-8"
-            )
-            print(f"  Wrote response.json ({len(ai_bytes)} bytes incl EOS)")
+                if still_generating:
+                    # Generation in flight — player re-talked before it finished.
+                    # Serve a personality filler instead of repeating original text.
+                    filler = get_filler(npc_key)
+                    print(f"  [FILLER] Still generating, serving: '{filler}'")
+                    filler_bytes = encode_text(filler, max_len=126)
+                    RESPONSE_FILE.write_text(
+                        json.dumps({"ai_bytes": filler_bytes}), encoding="utf-8"
+                    )
+                else:
+                    # First time talking to this NPC — serve original text instantly
+                    print(f"  [FIRST TALK] Serving original text, scheduling prefetch")
+                    ai_bytes = orig_bytes + [0xFF]
+                    RESPONSE_FILE.write_text(
+                        json.dumps({"ai_bytes": ai_bytes}), encoding="utf-8"
+                    )
+                    # Generate first AI response in background for next talk
+                    _schedule_prefetch(model, npc_key, orig_text)
 
         time.sleep(0.05)
 
