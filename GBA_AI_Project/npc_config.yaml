@@ -1,0 +1,94 @@
+# =============================================================
+# OpenClaw NPC Configuration
+# Edit this file to customize NPC behavior without touching code.
+# =============================================================
+
+
+# ---- Timing ------------------------------------------------
+# Seconds of conversation silence before background AI generation starts.
+conv_end_secs: 2.5
+
+
+# ---- Story map filter --------------------------------------
+# NPCs on these maps pass through original game dialog unchanged.
+# Format: [map_group, map_num]
+# Find IDs by watching the [REQUEST] log when you talk to NPCs.
+skip_ai_maps: []
+  # - [0, 0]   # example: Pallet Town Player's House 1F
+
+
+# ---- NPC personality map -----------------------------------
+# Maps npc_key ("{map_group}_{map_num}") to a personality type.
+# Personality types must exist in personality_fillers below.
+npc_personality:
+  "0_0": MOTHERLY    # Pallet Town Player's House 1F — Mom
+
+
+# ---- Personality filler words ------------------------------
+# Shown when player re-talks to an NPC while AI is still generating.
+# Each type is a list of short phrases the NPC might say while thinking.
+personality_fillers:
+  MOTHERLY:
+    - "Hmm..."
+    - "Oh my..."
+    - "Now, let me think..."
+    - "Oh, sweetie..."
+    - "My, my..."
+    - "Well..."
+
+  GRUFF:
+    - "Hmph."
+    - "..."
+    - "Bah."
+    - "Hold on."
+    - "Hm."
+
+  CHEERFUL:
+    - "Ooh!"
+    - "Umm..."
+    - "Oh!"
+    - "Heehee..."
+    - "Hmm!"
+
+  SCHOLARLY:
+    - "Fascinating..."
+    - "Hmm, yes..."
+    - "Interesting..."
+    - "Let me see..."
+    - "Ah..."
+
+  NERVOUS:
+    - "U-um..."
+    - "Uh..."
+    - "W-well..."
+    - "Eek, uh..."
+
+  MYSTERIOUS:
+    - "..."
+    - "Curious..."
+    - "I see..."
+    - "Mmm..."
+
+  DEFAULT:
+    - "Hmm..."
+    - "..."
+    - "Let me think..."
+
+
+# ---- Relationship levels -----------------------------------
+# Controls how the AI understands its bond with the player.
+# 'rival' and 'companion' unlock player data in the AI prompt.
+relationship_context:
+  stranger:    "You have just met this player."
+  acquaintance: "You know this player a little — you have spoken before."
+  friend:      "This player is your friend. You are warm and familiar with them."
+  rival: >
+    You are this player's rival — a fierce competitor.
+    You know their strength, their team, their badges.
+    Use that knowledge to challenge, taunt, and push them to be better.
+    You respect them but refuse to lose.
+  companion: >
+    You are this player's companion — you journey together.
+    You know their team, their items, their struggles.
+    Use that knowledge to support, encourage, and fight alongside them.
+    Their victories are yours too.

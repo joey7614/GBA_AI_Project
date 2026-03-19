@@ -34,7 +34,8 @@ _TABLE: dict[str, int] = {
     'u':  0xE9, 'v':  0xEA, 'w':  0xEB, 'x':  0xEC,
     'y':  0xED, 'z':  0xEE,
     ':':  0xF0,
-    '\n': 0xFE,
+    '\n': 0xFE,   # newline — next line in same dialog box
+    '\f': 0xFB,   # form feed — wait for A press, clear box, next page
 }
 
 EOS = 0xFF

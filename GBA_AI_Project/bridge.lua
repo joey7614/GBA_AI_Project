@@ -15,10 +15,11 @@
 -- ============================================================
 -- CONFIG
 -- ============================================================
-local IPC_BASE      = 0x0203F468
-local IPC_DIR       = "C:/Users/linji/Documents/GBA_AI_Project/GBA_AI_Project/ipc/"
-local REQUEST_FILE  = IPC_DIR .. "request.json"
-local RESPONSE_FILE = IPC_DIR .. "response.json"
+local IPC_BASE           = 0x0203F468
+local IPC_DIR            = "C:/Users/linji/Documents/GBA_AI_Project/GBA_AI_Project/ipc/"
+local REQUEST_FILE       = IPC_DIR .. "request.json"
+local RESPONSE_FILE      = IPC_DIR .. "response.json"
+local PLAYER_INPUT_FILE  = IPC_DIR .. "player_input_request.json"
 
 local EOS      = 0xFF
 local TEXT_MAX = 127
@@ -115,6 +116,13 @@ local wait_frames  = 0
 local TIMEOUT      = 600   -- 10 seconds at 60fps
 
 callbacks:add("frame", function()
+
+    -- ---- Check player_input_flag (Start menu "Ask NPC") ----
+    if emu:read8(IPC_BASE + 2) == 1 then
+        emu:write8(IPC_BASE + 2, 0)   -- clear flag
+        write_file(PLAYER_INPUT_FILE, '{"ask":1}')
+        console:log("[OpenClaw] Player requested NPC input")
+    end
 
     -- ---- Check request from ROM ----
     if not waiting and emu:read8(IPC_BASE) == 1 then
